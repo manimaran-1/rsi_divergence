@@ -260,16 +260,20 @@ def fetch_data(symbol, period='1y', interval='1d'):
     try:
         ticker = yf.Ticker(symbol)
         
+        fetch_interval = interval
         if interval == '1m':
             period = '5d'
-        elif interval in ['2m', '5m', '15m', '30m', '60m', '90m', '1h']:
+        elif interval in ['2m', '5m', '15m', '90m']:
             period = '1mo'
+        elif interval in ['30m', '60m', '1h']:
+            period = '1mo'
+            fetch_interval = '15m'
         elif interval in ['1d', '5d', '1wk']:
             period = '1y' 
         elif interval == '1mo':
             period = '5y'
             
-        df = ticker.history(period=period, interval=interval)
+        df = ticker.history(period=period, interval=fetch_interval)
         if not df.empty:
             df.columns = [c.lower() for c in df.columns]
             
@@ -279,12 +283,23 @@ def fetch_data(symbol, period='1y', interval='1d'):
             else:
                 df.index = df.index.tz_convert(IST)
                 
+            # Perform custom resampling if target is 30m or 60m/1h to guarantee 09:15 start groups
+            if interval in ['30m', '60m', '1h'] and fetch_interval == '15m':
+                rule = '30min' if interval == '30m' else '60min'
+                df = df.resample(rule, offset='15min').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna()
+                
             # Daily/Weekly/Monthly: shift to 15:30 IST market close
             if interval in ['1d', '5d', '1wk', '1mo']:
                 df.index = df.index + pd.Timedelta(hours=10)
             # Per-timeframe offsets to match user's exact TradingView alignment requests
             elif interval == '30m':
-                df.index = df.index - pd.Timedelta(minutes=45)
+                df.index = df.index - pd.Timedelta(minutes=30)
             elif interval in ['60m', '1h']:
                 df.index = df.index + pd.Timedelta(minutes=60)
             elif interval == '90m':
@@ -309,18 +324,22 @@ def fetch_bulk_data(symbols, period='1y', interval='1d', progress_callback=None)
     Returns a dictionary of symbol -> DataFrame.
     """
     try:
+        fetch_interval = interval
         if interval == '1m':
             period = '5d'
-        elif interval in ['2m', '5m', '15m', '30m', '60m', '90m', '1h']:
+        elif interval in ['2m', '5m', '15m', '90m']:
             period = '1mo'
+        elif interval in ['30m', '60m', '1h']:
+            period = '1mo'
+            fetch_interval = '15m'
         elif interval in ['1d', '5d', '1wk']:
             period = '1y' 
         elif interval == '1mo':
             period = '5y'
             
-        print(f"Bulk downloading {len(symbols)} symbols. Period={period}, Interval={interval}...")
+        print(f"Bulk downloading {len(symbols)} symbols. Period={period}, Interval={fetch_interval} (target: {interval})...")
         
-        bulk_data = yf.download(symbols, period=period, interval=interval, group_by='ticker', threads=True, progress=False)
+        bulk_data = yf.download(symbols, period=period, interval=fetch_interval, group_by='ticker', threads=True, progress=False)
         
         results = {}
         if bulk_data.empty:
@@ -341,12 +360,23 @@ def fetch_bulk_data(symbols, period='1y', interval='1d', progress_callback=None)
             else:
                 df.index = df.index.tz_convert(IST)
                 
+            # Perform custom resampling if target is 30m or 60m/1h to guarantee 09:15 start groups
+            if interval in ['30m', '60m', '1h'] and fetch_interval == '15m':
+                rule = '30min' if interval == '30m' else '60min'
+                df = df.resample(rule, offset='15min').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna()
+                
             # Daily/Weekly/Monthly: shift to 15:30 IST market close
             if interval in ['1d', '5d', '1wk', '1mo']:
                 df.index = df.index + pd.Timedelta(hours=10)
             # Per-timeframe offsets to match user's exact TradingView alignment requests
             elif interval == '30m':
-                df.index = df.index - pd.Timedelta(minutes=45)
+                df.index = df.index - pd.Timedelta(minutes=30)
             elif interval in ['60m', '1h']:
                 df.index = df.index + pd.Timedelta(minutes=60)
             elif interval == '90m':
