@@ -1,22 +1,6 @@
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 
-def calculate_ema(df, length):
-    return ta.ema(df['close'], length=length)
-
-def calculate_atr(df, length):
-    return ta.atr(df['high'], df['low'], df['close'], length=length, mamode="rma")
-
-def calculate_bollinger_bands(df, length=20, std_dev=2.0):
-    try:
-        bb = ta.bbands(df['close'], length=length, std=std_dev, mamode="sma", ddof=0)
-    except TypeError:
-        bb = ta.bbands(df['close'], length=length, std=std_dev, mamode="sma")
-    if bb is not None and not bb.empty:
-        bbl_col = [c for c in bb.columns if c.startswith('BBL')][0]
-        bbu_col = [c for c in bb.columns if c.startswith('BBU')][0]
-        return bb[bbl_col], bb[bbu_col]
 def calculate_rma(s, length):
     """
     Calculates the Running Moving Average (RMA) as used in PineScript.
@@ -25,9 +9,25 @@ def calculate_rma(s, length):
     Initial value is SMA.
     """
     alpha = 1.0 / length
-    # Use pandas EWM to calculate RMA (Wilder's Smoothing)
-    # adjust=False makes it standard recursive EMA matching PineScript
     return s.ewm(alpha=alpha, adjust=False, min_periods=length).mean()
+
+def calculate_ema(df, length):
+    return df['close'].ewm(span=length, adjust=False, min_periods=length).mean()
+
+def calculate_atr(df, length):
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift(1)).abs()
+    low_close = (df['low'] - df['close'].shift(1)).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return calculate_rma(tr, length)
+
+def calculate_bollinger_bands(df, length=20, std_dev=2.0):
+    sma = df['close'].rolling(window=length).mean()
+    # ddof=0 matches pandas_ta bbands defaults for population std dev
+    std = df['close'].rolling(window=length).std(ddof=0)
+    bbl = sma - (std_dev * std)
+    bbu = sma + (std_dev * std)
+    return bbl, bbu
 
 def calculate_tv_rsi(df, length):
     """
