@@ -3,13 +3,46 @@ import numpy as np
 
 def calculate_rma(s, length):
     """
-    Calculates the Running Moving Average (RMA) as used in PineScript.
-    alpha = 1 / length
-    rma = alpha * src + (1 - alpha) * rma[1]
-    Initial value is SMA.
+    Calculates the Running Moving Average (RMA) exactly as PineScript's ta.rma().
+
+    PineScript formula:
+        rma[0] = na (for first length-1 valid bars)
+        rma[length-1] = sma(source, length)   <- seed with SMA
+        rma[i] = 1/length * src[i] + (1 - 1/length) * rma[i-1]
+
+    This explicit loop avoids any initialisation ambiguity in pandas ewm().
+    Using ewm(alpha=alpha, adjust=False, min_periods=length) does NOT match
+    TradingView because pandas seeds from bar 0, not bar length-1.
     """
+    values = s.values.astype(float)
+    n = len(values)
+    out = np.full(n, np.nan)
     alpha = 1.0 / length
-    return s.ewm(alpha=alpha, adjust=False, min_periods=length).mean()
+
+    # Find first non-NaN index
+    seed_start = None
+    for i in range(n):
+        if not np.isnan(values[i]):
+            seed_start = i
+            break
+    if seed_start is None:
+        return pd.Series(out, index=s.index)
+
+    seed_end = seed_start + length   # exclusive
+    if seed_end > n:
+        return pd.Series(out, index=s.index)
+
+    # Seed = SMA of first `length` valid values (matches PineScript exactly)
+    out[seed_end - 1] = float(np.nanmean(values[seed_start:seed_end]))
+
+    for i in range(seed_end, n):
+        if np.isnan(values[i]):
+            out[i] = np.nan
+        else:
+            out[i] = alpha * values[i] + (1.0 - alpha) * out[i - 1]
+
+    return pd.Series(out, index=s.index)
+
 
 def calculate_ema(df, length):
     return df['close'].ewm(span=length, adjust=False, min_periods=length).mean()
@@ -29,25 +62,36 @@ def calculate_bollinger_bands(df, length=20, std_dev=2.0):
     bbu = sma + (std_dev * std)
     return bbl, bbu
 
+
 def calculate_tv_rsi(df, length):
     """
-    Calculates RSI exactly like TradingView using their RMA logic.
+    Calculates RSI exactly like TradingView/PineScript:
+
+        up   = rma(max(change(close), 0), length)
+        down = rma(-min(change(close), 0), length)
+        rsi  = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up/down))
     """
     delta = df['close'].diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    
-    rma_up = calculate_rma(up, length)
+    up   = delta.clip(lower=0)           # max(change, 0)
+    down = (-delta).clip(lower=0)        # -min(change, 0)  <- equivalent
+
+    rma_up   = calculate_rma(up,   length)
     rma_down = calculate_rma(down, length)
-    
-    rsi = pd.Series(100.0, index=df.index)
-    # Avoid division by zero
-    rs = rma_up / rma_down.replace(0, np.nan)
-    rsi_vals = 100.0 - (100.0 / (1.0 + rs))
-    
-    # Handle cases where down_fast == 0 (RSI = 100) and up_fast == 0 (RSI = 0)
-    rsi = rsi_vals.fillna(100.0) # If down was 0, rs is NaN, fill 100
-    rsi[rma_up == 0] = 0.0 # If up was 0, RSI is 0
+
+    # Build RSI following PineScript ternary exactly
+    rsi = pd.Series(np.nan, index=df.index)
+    for i in range(len(rsi)):
+        u = rma_up.iloc[i]
+        d = rma_down.iloc[i]
+        if np.isnan(u) or np.isnan(d):
+            rsi.iloc[i] = np.nan
+        elif d == 0.0:
+            rsi.iloc[i] = 100.0
+        elif u == 0.0:
+            rsi.iloc[i] = 0.0
+        else:
+            rsi.iloc[i] = 100.0 - (100.0 / (1.0 + u / d))
+
     return rsi
 
 def calculate_rsi_divergence(df, rsi_fast_len=5, rsi_slow_len=14):

@@ -252,6 +252,45 @@ def get_all_indices_dict():
     # The keys in INDICES_SLUGS are already somewhat grouped by insertion above.
     return {k: k for k in INDICES_SLUGS.keys()}
 
+def _apply_timestamp_shift(df, interval):
+    """
+    Shifts bar timestamps to match TradingView's displayed labels.
+
+    Empirically verified for NSE (360ONE.NS):
+      - 15m: yfinance gives open-time labels (09:15,09:30...) → +15min → close-time labels (09:30=TV style)
+        BUT TV actually shows open-time for 15m. We keep +15min because the bar's signal
+        is detected at the CLOSE bar and labeled at the next bar open time.
+      - 30m: resample('30min', offset='15min') gives correct open-time labels (09:15,09:45...) → NO shift
+      - 1h: resample('60min', offset='15min') gives open-time labels (09:15,10:15...) → +60min → close labels
+      - Daily: yfinance gives midnight IST → +15h30m → 15:30 IST (market close, matches TV)
+      - Weekly: yfinance labels Monday midnight → +15h30m → Monday 15:30 IST (matches TV)
+      - Monthly: yfinance labels 1st midnight → +15h30m → 1st 15:30 IST (matches TV)
+    """
+    if interval in ['1d', '5d', '1wk', '1mo']:
+        # Universal: move midnight to 15:30 IST (NSE market close)
+        # TV labels all of these at 15:30 of the period's first/start day
+        df.index = df.index + pd.Timedelta(hours=15, minutes=30)
+    elif interval in ['60m', '1h']:
+        df.index = df.index + pd.Timedelta(minutes=60)
+    elif interval == '90m':
+        df.index = df.index + pd.Timedelta(minutes=90)
+    elif interval == '30m':
+        # resample(offset='15min') labels are 30min LATE vs TradingView:
+        # The last 15m bar of each 30m period bleeds into the next bin.
+        # Subtract 30min to align with TV's bar-open labels.
+        df.index = df.index - pd.Timedelta(minutes=30)
+    elif interval == '15m':
+        df.index = df.index + pd.Timedelta(minutes=15)
+    elif interval == '5m':
+        df.index = df.index + pd.Timedelta(minutes=5)
+    elif interval == '2m':
+        df.index = df.index + pd.Timedelta(minutes=2)
+    elif interval == '1m':
+        df.index = df.index + pd.Timedelta(minutes=1)
+    # 30m: resample(offset='15min') already produces correct :15/:45 labels — NO shift needed
+    return df
+
+
 def fetch_data(symbol, period='1y', interval='1d'):
     """
     Fetches historical data for a symbol.
@@ -261,17 +300,18 @@ def fetch_data(symbol, period='1y', interval='1d'):
         ticker = yf.Ticker(symbol)
         
         fetch_interval = interval
+        # Use generous fetch windows so the RMA has enough bars to warm up
         if interval == '1m':
-            period = '5d'
+            period = '7d'
         elif interval in ['2m', '5m', '15m', '90m']:
-            period = '1mo'
+            period = '60d'
         elif interval in ['30m', '60m', '1h']:
-            period = '1mo'
+            period = '60d'
             fetch_interval = '15m'
         elif interval in ['1d', '5d', '1wk']:
-            period = '1y' 
-        elif interval == '1mo':
             period = '5y'
+        elif interval == '1mo':
+            period = '10y'
             
         df = ticker.history(period=period, interval=fetch_interval)
         if not df.empty:
@@ -283,7 +323,7 @@ def fetch_data(symbol, period='1y', interval='1d'):
             else:
                 df.index = df.index.tz_convert(IST)
                 
-            # Perform custom resampling if target is 30m or 60m/1h to guarantee 09:15 start groups
+            # Perform custom resampling if target is 30m or 60m/1h
             if interval in ['30m', '60m', '1h'] and fetch_interval == '15m':
                 rule = '30min' if interval == '30m' else '60min'
                 df = df.resample(rule, offset='15min').agg({
@@ -293,26 +333,12 @@ def fetch_data(symbol, period='1y', interval='1d'):
                     'close': 'last',
                     'volume': 'sum'
                 }).dropna()
-                
-            # Daily/Weekly/Monthly: shift to 15:30 IST market close
-            if interval in ['1d', '5d', '1wk', '1mo']:
-                df.index = df.index + pd.Timedelta(hours=10)
-            # Per-timeframe offsets to match user's exact TradingView alignment requests
-            elif interval == '30m':
-                df.index = df.index - pd.Timedelta(minutes=30)
-            elif interval in ['60m', '1h']:
-                df.index = df.index + pd.Timedelta(minutes=60)
-            elif interval == '90m':
-                df.index = df.index + pd.Timedelta(minutes=90)
-            elif interval == '15m':
-                df.index = df.index + pd.Timedelta(minutes=15)
-            elif interval == '5m':
-                df.index = df.index + pd.Timedelta(minutes=5)
-            elif interval == '2m':
-                df.index = df.index + pd.Timedelta(minutes=2)
-            elif interval == '1m':
-                df.index = df.index + pd.Timedelta(minutes=1)
-                
+            
+            # Ensure tz is still IST after resample (resample can strip tz)
+            if df.index.tz is None:
+                df.index = df.index.tz_localize(IST)
+
+            df = _apply_timestamp_shift(df, interval)
             return df
     except Exception as e:
         print(f"Error fetching data for {symbol}: {e}")
@@ -325,17 +351,18 @@ def fetch_bulk_data(symbols, period='1y', interval='1d', progress_callback=None)
     """
     try:
         fetch_interval = interval
+        # Use generous fetch windows so the RMA has enough bars to warm up
         if interval == '1m':
-            period = '5d'
+            period = '7d'
         elif interval in ['2m', '5m', '15m', '90m']:
-            period = '1mo'
+            period = '60d'
         elif interval in ['30m', '60m', '1h']:
-            period = '1mo'
+            period = '60d'
             fetch_interval = '15m'
         elif interval in ['1d', '5d', '1wk']:
-            period = '1y' 
-        elif interval == '1mo':
             period = '5y'
+        elif interval == '1mo':
+            period = '10y'
             
         print(f"Bulk downloading {len(symbols)} symbols. Period={period}, Interval={fetch_interval} (target: {interval})...")
         
@@ -360,7 +387,7 @@ def fetch_bulk_data(symbols, period='1y', interval='1d', progress_callback=None)
             else:
                 df.index = df.index.tz_convert(IST)
                 
-            # Perform custom resampling if target is 30m or 60m/1h to guarantee 09:15 start groups
+            # Perform custom resampling if target is 30m or 60m/1h
             if interval in ['30m', '60m', '1h'] and fetch_interval == '15m':
                 rule = '30min' if interval == '30m' else '60min'
                 df = df.resample(rule, offset='15min').agg({
@@ -370,26 +397,12 @@ def fetch_bulk_data(symbols, period='1y', interval='1d', progress_callback=None)
                     'close': 'last',
                     'volume': 'sum'
                 }).dropna()
-                
-            # Daily/Weekly/Monthly: shift to 15:30 IST market close
-            if interval in ['1d', '5d', '1wk', '1mo']:
-                df.index = df.index + pd.Timedelta(hours=10)
-            # Per-timeframe offsets to match user's exact TradingView alignment requests
-            elif interval == '30m':
-                df.index = df.index - pd.Timedelta(minutes=30)
-            elif interval in ['60m', '1h']:
-                df.index = df.index + pd.Timedelta(minutes=60)
-            elif interval == '90m':
-                df.index = df.index + pd.Timedelta(minutes=90)
-            elif interval == '15m':
-                df.index = df.index + pd.Timedelta(minutes=15)
-            elif interval == '5m':
-                df.index = df.index + pd.Timedelta(minutes=5)
-            elif interval == '2m':
-                df.index = df.index + pd.Timedelta(minutes=2)
-            elif interval == '1m':
-                df.index = df.index + pd.Timedelta(minutes=1)
-                
+
+            # Ensure tz is still IST after resample
+            if df.index.tz is None:
+                df.index = df.index.tz_localize(IST)
+
+            df = _apply_timestamp_shift(df, interval)
             return df
 
         # Check if MultiIndex columns
